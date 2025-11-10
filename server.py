@@ -59,18 +59,11 @@ def make_license(product: str, token: str, hwid: str) -> dict:
         "product": product or "DIBUTEK Pro",
         "token": token,
         "hardware_id": hwid,
-        "issued_at": now
+        "issued_at": now,
     }
     body = json.dumps(lic, sort_keys=True, ensure_ascii=False).encode("utf-8")
-
-    # Firma HEX (la que tu app valida hoy)
-    hex_sig = hashlib.sha256(body + SECRET.encode("utf-8")).hexdigest()
-    lic["signature"] = hex_sig
-
-    # Opcional: dejamos también HMAC base64 en otro campo informativo
-    hmac_b = hmac.new(SECRET.encode("utf-8"), body, hashlib.sha256).digest()
-    lic["_signature_b64"] = base64.b64encode(hmac_b).decode("utf-8")
-
+    sig_hex = hashlib.sha256(body + SECRET.encode("utf-8")).hexdigest()
+    lic["signature"] = sig_hex  # <- HEX que tu app espera
     return lic
 
 def require_admin(req) -> bool:
@@ -89,7 +82,7 @@ def health():
 def activate():
     data = request.get_json(silent=True) or {}
     token = (data.get("token") or "").strip()
-    hwid  = (data.get("hardware_id") or "").strip()
+    hwid = (data.get("hardware_id") or "").strip()
 
     if not token or not hwid:
         return jsonify({"ok": False, "error": "Missing token or hardware_id"}), 400
@@ -97,30 +90,41 @@ def activate():
     with _lock:
         tokens = load_tokens()
         entry = tokens.get(token)
+
         if not entry:
             return jsonify({"ok": False, "error": "Token inválido"}), 404
 
-        # ✅ Compatibilidad con enabled/disabled
-        if not token_is_enabled(entry):
+        # Compatibilidad: consideramos deshabilitado si:
+        # - disabled == True  (nuevo formato)
+        # - enabled == False  (algunos JSON)
+        # - used == True      (formato viejo)
+        disabled_flag = bool(entry.get("disabled"))
+        enabled_flag = entry.get("enabled")
+        used_flag = bool(entry.get("used"))
+
+        if disabled_flag or (enabled_flag is False) or used_flag:
             return jsonify({"ok": False, "error": "Token deshabilitado o ya usado"}), 403
 
-        # HWID restringido (opcional)
-        allowed_hwid = (entry.get("allowed_hwid") or "").strip()
+        allowed_hwid = entry.get("allowed_hwid")
         if allowed_hwid and allowed_hwid != hwid:
             return jsonify({"ok": False, "error": "HWID no autorizado para este token"}), 403
 
         product = entry.get("product", "DIBUTEK Pro")
+
+        # --- Generar licencia firmada (tu app valida firma y HWID) ---
         lic = make_license(product, token, hwid)
 
-        # Si el token es de un solo uso, lo marcamos como usado en AMBOS formatos
+        # --- Si el token es de un solo uso, lo marcamos consumido en TODOS los sabores ---
         if SINGLE_USE:
-    entry["disabled"] = True
-    entry["used"] = True
-    entry["used_at"] = datetime.datetime.utcnow().isoformat() + "Z"
-    entry["used_by_hwid"] = hwid
-    tokens[token] = entry
-    save_tokens(tokens)
+            entry["disabled"] = True          # nuevo campo
+            entry["enabled"] = False          # por compatibilidad
+            entry["used"] = True              # por compatibilidad retro
+            entry["used_at"] = datetime.datetime.utcnow().isoformat() + "Z"
+            entry["used_by_hwid"] = hwid
+            tokens[token] = entry
+            save_tokens(tokens)
 
+    # Devolvemos JSON normal y también en base64 (por si quisieras usarlo)
     lic_txt = json.dumps(lic, ensure_ascii=False)
     lic_b64 = base64.b64encode(lic_txt.encode("utf-8")).decode("utf-8")
     return jsonify({"ok": True, "license": lic, "license_b64": lic_b64})
