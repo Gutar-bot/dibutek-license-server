@@ -55,18 +55,16 @@ def sign_hmac_b64(payload: dict) -> str:
 
 def make_license(product: str, token: str, hwid: str) -> dict:
     now = datetime.datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
-    payload = {
+    lic = {
         "product": product or "DIBUTEK Pro",
         "token": token,
         "hardware_id": hwid,
         "issued_at": now
     }
-    # La app cliente valida: sha256( json_ordenado + SECRET ) en HEX
-    signature_hex = sign_hex(payload)
-
-    lic = dict(payload)
-    lic["signature"] = signature_hex           # *** clave: la app mira ESTE campo ***
-    lic["signature_hmac_b64"] = sign_hmac_b64(payload)  # opcional (diagnóstico)
+    # Firma que la APP espera:
+    lic["signature"] = sign_hex(lic)        # <= HEX SHA256(body+secret)
+    # (Opcional) dejamos también la HMAC b64 como info adicional:
+    lic["_hmac_b64"] = sign_hmac_b64(lic)
     return lic
 
 def require_admin(req) -> bool:
