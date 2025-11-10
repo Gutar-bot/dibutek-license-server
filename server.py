@@ -61,10 +61,16 @@ def make_license(product: str, token: str, hwid: str) -> dict:
         "hardware_id": hwid,
         "issued_at": now
     }
-    # Firma que la APP espera:
-    lic["signature"] = sign_hex(lic)        # <= HEX SHA256(body+secret)
-    # (Opcional) dejamos también la HMAC b64 como info adicional:
-    lic["_hmac_b64"] = sign_hmac_b64(lic)
+    body = json.dumps(lic, sort_keys=True, ensure_ascii=False).encode("utf-8")
+
+    # Firma HEX (la que tu app valida hoy)
+    hex_sig = hashlib.sha256(body + SECRET.encode("utf-8")).hexdigest()
+    lic["signature"] = hex_sig
+
+    # Opcional: dejamos también HMAC base64 en otro campo informativo
+    hmac_b = hmac.new(SECRET.encode("utf-8"), body, hashlib.sha256).digest()
+    lic["_signature_b64"] = base64.b64encode(hmac_b).decode("utf-8")
+
     return lic
 
 def require_admin(req) -> bool:
@@ -108,12 +114,12 @@ def activate():
 
         # Si el token es de un solo uso, lo marcamos como usado en AMBOS formatos
         if SINGLE_USE:
-            entry["disabled"] = True    # formato nuevo (preferido)
-            entry["enabled"]  = False   # formato viejo (si alguien lo mira)
-            entry["used_at"] = datetime.datetime.utcnow().isoformat() + "Z"
-            entry["used_by_hwid"] = hwid
-            tokens[token] = entry
-            save_tokens(tokens)
+    entry["disabled"] = True
+    entry["used"] = True
+    entry["used_at"] = datetime.datetime.utcnow().isoformat() + "Z"
+    entry["used_by_hwid"] = hwid
+    tokens[token] = entry
+    save_tokens(tokens)
 
     lic_txt = json.dumps(lic, ensure_ascii=False)
     lic_b64 = base64.b64encode(lic_txt.encode("utf-8")).decode("utf-8")
