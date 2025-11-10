@@ -7,7 +7,13 @@ app = Flask(__name__)
 # ======================
 # Configuración (ENV VARS)
 # ======================
-SECRET = os.environ.get("DIBUTEK_SECRET", "DIBUTEK-LIC-SECRET-2025")  # Debe coincidir con tu app
+# Lee cualquiera de las dos, prioriza DIBUTEK_SECRET; si no, usa DIBUTEK_HMAC_SECRET
+SECRET = (
+    os.environ.get("DIBUTEK_SECRET")
+    or os.environ.get("DIBUTEK_HMAC_SECRET")
+    or "DIBUTEK-LIC-SECRET-2025"
+)
+# Debe coincidir con tu app
 TOKENS_FILE = os.environ.get("TOKENS_FILE", "tokens.json")
 SINGLE_USE = os.environ.get("SINGLE_USE", "1") == "1"                # 1=token de un solo uso
 ADMIN_KEY = os.environ.get("ADMIN_KEY", "")                          # clave admin para endpoints /admin
@@ -29,7 +35,15 @@ def load_tokens():
 def save_tokens(tokens: dict):
     with open(TOKENS_FILE, "w", encoding="utf-8") as f:
         json.dump(tokens, f, ensure_ascii=False, indent=2)
-
+def token_is_enabled(entry: dict) -> bool:
+    # Si el token usa bandera "disabled", lo habilitado es "not disabled"
+    if "disabled" in entry:
+        return not bool(entry.get("disabled"))
+    # Si el token usa bandera "enabled", respetamos ese valor
+    if "enabled" in entry:
+        return bool(entry.get("enabled"))
+    # Si no trae ninguna bandera, lo consideramos habilitado por defecto
+    return True
 def sign_hex(payload: dict) -> str:
     body = json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
     return hashlib.sha256(body + SECRET.encode("utf-8")).hexdigest()
@@ -41,15 +55,18 @@ def sign_hmac_b64(payload: dict) -> str:
 
 def make_license(product: str, token: str, hwid: str) -> dict:
     now = datetime.datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
-    lic = {
+    payload = {
         "product": product or "DIBUTEK Pro",
         "token": token,
         "hardware_id": hwid,
         "issued_at": now
     }
-    # Firmas en dos formatos (tu app funciona con cualquiera: devuelvo ambos)
-    lic["signature"] = sign_hmac_b64(lic)  # preferido: HMAC-SHA256 base64
-    lic["_signature_hex"] = sign_hex(lic)  # compatibilidad: hex
+    # La app cliente valida: sha256( json_ordenado + SECRET ) en HEX
+    signature_hex = sign_hex(payload)
+
+    lic = dict(payload)
+    lic["signature"] = signature_hex           # *** clave: la app mira ESTE campo ***
+    lic["signature_hmac_b64"] = sign_hmac_b64(payload)  # opcional (diagnóstico)
     return lic
 
 def require_admin(req) -> bool:
@@ -68,7 +85,7 @@ def health():
 def activate():
     data = request.get_json(silent=True) or {}
     token = (data.get("token") or "").strip()
-    hwid = (data.get("hardware_id") or "").strip()
+    hwid  = (data.get("hardware_id") or "").strip()
 
     if not token or not hwid:
         return jsonify({"ok": False, "error": "Missing token or hardware_id"}), 400
@@ -78,18 +95,23 @@ def activate():
         entry = tokens.get(token)
         if not entry:
             return jsonify({"ok": False, "error": "Token inválido"}), 404
-        if entry.get("disabled"):
-            return jsonify({"ok": False, "error": "Token ya usado o deshabilitado"}), 403
 
-        allowed_hwid = entry.get("allowed_hwid")
+        # ✅ Compatibilidad con enabled/disabled
+        if not token_is_enabled(entry):
+            return jsonify({"ok": False, "error": "Token deshabilitado o ya usado"}), 403
+
+        # HWID restringido (opcional)
+        allowed_hwid = (entry.get("allowed_hwid") or "").strip()
         if allowed_hwid and allowed_hwid != hwid:
             return jsonify({"ok": False, "error": "HWID no autorizado para este token"}), 403
 
         product = entry.get("product", "DIBUTEK Pro")
         lic = make_license(product, token, hwid)
 
+        # Si el token es de un solo uso, lo marcamos como usado en AMBOS formatos
         if SINGLE_USE:
-            entry["disabled"] = True
+            entry["disabled"] = True    # formato nuevo (preferido)
+            entry["enabled"]  = False   # formato viejo (si alguien lo mira)
             entry["used_at"] = datetime.datetime.utcnow().isoformat() + "Z"
             entry["used_by_hwid"] = hwid
             tokens[token] = entry
